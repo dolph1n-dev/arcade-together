@@ -1,151 +1,71 @@
-import Lobby from './components/Lobby'
-import { useState, useEffect } from 'react'
-import { db } from './lib/firebase'
-import { ref, set, get, onValue, update } from 'firebase/database'
+import { useEffect } from 'react'
+import Header from './components/Header'
+import Footer from './components/Footer'
+import HomeView from './components/HomeView'
+import HostWaitingView from './components/HostWaitingView'
+import JoinRoomView from './components/JoinRoomView'
+import LobbyView from './components/LobbyView'
+import TicTacToeGame from './components/TicTacToeGame'
 import { useStore } from './store'
-import './App.css'
+import { db } from './lib/firebase'
+import { ref, onValue } from 'firebase/database'
 
-function App() {
-  const [joinCode, setJoinCode] = useState('')
-  const [errorMsg, setErrorMsg] = useState('')
-  const { roomId, playerId, playerColor, roomStatus, setRoom, setStatus, resetRoom } = useStore()
+export default function App() {
+  const { 
+    currentView, 
+    roomId, 
+    playerId, 
+    setOpponentNickname, 
+    setView 
+  } = useStore()
 
-  // 6 haneli rastgele oda kodu üretici
-  const generateCode = () => Math.random().toString(36).substring(2, 8).toUpperCase()
-
-  // ODA KUR (HOST)
-  const handleHost = async () => {
-    setErrorMsg('')
-    const code = generateCode()
-    const roomRef = ref(db, `rooms/${code}`)
-    
-    try {
-      // Firebase'e odayı yaz
-      await set(roomRef, {
-        hostReady: true,
-        guestReady: false,
-        createdAt: Date.now()
-      })
-    } catch (err) {
-      console.warn('Firebase sync warning:', err)
-    }
-    
-    // Oyuncu 1 (Host) olarak state'i güncelle - Neon Turkuaz
-    setRoom(code, 1, 'text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.8)]', 'waiting')
-  }
-
-  // ODAYA KATIL (JOIN)
-  const handleJoin = async () => {
-    if (!joinCode.trim()) return
-    setErrorMsg('')
-    const code = joinCode.toUpperCase().trim()
-    const roomRef = ref(db, `rooms/${code}`)
-    
-    try {
-      // Oda var mı kontrol et
-      const snapshot = await get(roomRef)
-
-      if (snapshot.exists()) {
-        const data = snapshot.val()
-        if (!data.guestReady) {
-          // Oda müsait, Firebase'i güncelle
-          await update(roomRef, { guestReady: true })
-          // Oyuncu 2 (Guest) olarak state'i güncelle - Neon Kırmızı/Mor
-          setRoom(code, 2, 'text-fuchsia-500 drop-shadow-[0_0_8px_rgba(217,70,239,0.8)]', 'connected')
-        } else {
-          setErrorMsg("Bu oda zaten dolu!")
-        }
-      } else {
-        setErrorMsg("Geçersiz oda kodu!")
-      }
-    } catch (err) {
-      console.warn('Firebase join warning:', err)
-      // Allow fallback connection
-      setRoom(code, 2, 'text-fuchsia-500 drop-shadow-[0_0_8px_rgba(217,70,239,0.8)]', 'connected')
-    }
-  }
-
-  // HOST İÇİN DİNLEYİCİ: Oyuncu 2 geldiğinde haberdar ol
+  // Handle URL share parameters (e.g. ?room=HS5Q1)
   useEffect(() => {
-    if (roomId && playerId === 1) {
-      const roomRef = ref(db, `rooms/${roomId}`)
-      
-      // onValue, veritabanındaki değişiklikleri anlık dinler
-      const unsubscribe = onValue(roomRef, (snapshot) => {
-        const data = snapshot.val()
-        if (data && data.guestReady) {
-          setStatus('connected')
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const roomParam = params.get('room')
+      if (roomParam && currentView === 'home') {
+        setView('join')
+      }
+    } catch {}
+  }, [currentView, setView])
+
+  // Global room presence & opponent listener
+  useEffect(() => {
+    if (!roomId) return
+
+    const roomRef = ref(db, `rooms/${roomId}`)
+    const unsubscribe = onValue(roomRef, (snapshot) => {
+      const data = snapshot.val()
+      if (data) {
+        // Track opponent nickname
+        if (playerId === 1 && data.guestNickname) {
+          setOpponentNickname(data.guestNickname)
+        } else if (playerId === 2 && data.hostNickname) {
+          setOpponentNickname(data.hostNickname)
         }
-      })
-      
-      // Bileşen ekrandan kalktığında dinlemeyi bırak
-      return () => unsubscribe()
-    }
-  }, [roomId, playerId, setStatus])
+      }
+    })
 
-  if (roomStatus === 'connected') {
-    return <Lobby />
-  }
+    return () => unsubscribe()
+  }, [roomId, playerId, setOpponentNickname])
 
-  // ARAYÜZ (UI)
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center font-mono p-4">
-      <h1 className="text-4xl font-bold mb-10 text-white drop-shadow-[0_0_10px_rgba(255,255,255,0.8)]">
-        ARCADE TOGETHER
-      </h1>
+    <div className="min-h-screen bg-[#12131c] text-[#e3e1ef] flex flex-col font-['Hanken_Grotesk'] selection:bg-[#00f5d4] selection:text-[#00201a] relative overflow-x-hidden">
+      {/* Top Navigation Bar */}
+      <Header />
 
-      {errorMsg && (
-        <div className="mb-4 px-4 py-2 bg-red-950/80 border border-red-500 text-red-300 rounded text-sm">
-          {errorMsg}
-        </div>
-      )}
+      {/* Dynamic View Router */}
+      <div className="flex-1 flex flex-col">
+        {currentView === 'home' && <HomeView />}
+        {currentView === 'host_waiting' && <HostWaitingView />}
+        {currentView === 'join' && <JoinRoomView />}
+        {currentView === 'lobby' && <LobbyView />}
+        {currentView === 'game' && <TicTacToeGame />}
+      </div>
 
-      {roomStatus === 'idle' && (
-        <div className="flex flex-col gap-6 items-center w-full max-w-xs">
-          <button 
-            onClick={handleHost}
-            className="w-full py-3 bg-gray-800 border-2 border-cyan-400 text-cyan-400 hover:bg-cyan-950 transition-colors rounded-lg font-bold tracking-widest drop-shadow-[0_0_5px_rgba(34,211,238,0.5)] cursor-pointer"
-          >
-            HOST
-          </button>
-          
-          <div className="w-full flex items-center gap-2">
-            <input 
-              type="text" 
-              placeholder="ODA KODU" 
-              value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleJoin()}
-              className="flex-1 py-3 px-4 bg-gray-800 border-2 border-fuchsia-500 text-fuchsia-500 placeholder-fuchsia-500/50 outline-none rounded-lg text-center font-bold uppercase"
-            />
-            <button 
-              onClick={handleJoin}
-              className="py-3 px-6 bg-gray-800 border-2 border-fuchsia-500 text-fuchsia-500 hover:bg-fuchsia-950 transition-colors rounded-lg font-bold drop-shadow-[0_0_5px_rgba(217,70,239,0.5)] cursor-pointer"
-            >
-              JOIN
-            </button>
-          </div>
-        </div>
-      )}
-
-      {roomStatus === 'waiting' && (
-        <div className="text-center">
-          <p className="text-xl mb-2 text-gray-200">Oda oluşturuldu!</p>
-          <p className="text-sm text-gray-400 mb-4">Arkadaşına bu kodu gönder:</p>
-          <div className={`text-5xl font-bold ${playerColor} animate-pulse my-4`}>{roomId}</div>
-          <p className="mt-6 text-gray-400">Oyuncu 2 bekleniyor...</p>
-          <div className="mt-8">
-            <button
-              onClick={() => resetRoom()}
-              className="text-xs text-gray-400 hover:text-white px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 transition-colors border border-gray-700 cursor-pointer"
-            >
-              İptal Et
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Shared Web Footer */}
+      <Footer />
     </div>
   )
 }
-
-export default App
