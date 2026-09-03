@@ -11,11 +11,14 @@ import {
 import { useStore } from '../store'
 import { db } from '../lib/firebase'
 import { ref, onValue, push, update } from 'firebase/database'
+import { setupPresenceTracker } from '../lib/session'
 
 export default function LobbyView() {
   const { 
     roomId, 
     playerId, 
+    playerSlot,
+    userPlayerId,
     nickname, 
     selectedGame, 
     setSelectedGame, 
@@ -129,12 +132,15 @@ export default function LobbyView() {
     }
   ]
 
-  // Listen to messages & room sync in Firebase
+  // Listen to messages & session sync in Firebase
   useEffect(() => {
     if (!roomId) return
 
+    const slot = playerSlot || (playerId === 1 ? 'playerA' : 'playerB')
+    const cleanupPresence = setupPresenceTracker(roomId, slot)
+
     // Messages sync
-    const messagesRef = ref(db, `rooms/${roomId}/messages`)
+    const messagesRef = ref(db, `sessions/${roomId}/messages`)
     const unsubMessages = onValue(messagesRef, (snapshot) => {
       const data = snapshot.val()
       if (data) {
@@ -147,8 +153,8 @@ export default function LobbyView() {
     })
 
     // Active game & selection sync
-    const roomRef = ref(db, `rooms/${roomId}`)
-    const unsubRoom = onValue(roomRef, (snapshot) => {
+    const sessionRef = ref(db, `sessions/${roomId}`)
+    const unsubSession = onValue(sessionRef, (snapshot) => {
       const data = snapshot.val()
       if (data) {
         if (data.selectedGame) setSelectedGame(data.selectedGame)
@@ -160,10 +166,11 @@ export default function LobbyView() {
     })
 
     return () => {
+      cleanupPresence()
       unsubMessages()
-      unsubRoom()
+      unsubSession()
     }
-  }, [roomId, setSelectedGame, setActiveGame, setView])
+  }, [roomId, playerSlot, playerId, setSelectedGame, setActiveGame, setView])
 
   // Scroll chat to bottom on new message
   useEffect(() => {
@@ -175,16 +182,17 @@ export default function LobbyView() {
     setSelectedGame(game)
     if (roomId) {
       try {
-        const roomRef = ref(db, `rooms/${roomId}`)
-        await update(roomRef, {
+        const sessionRef = ref(db, `sessions/${roomId}`)
+        await update(sessionRef, {
           activeGame: game.id,
+          gameType: game.id,
           selectedGame: game,
-          'game/gameStatus': 'active'
+          'game/status': 'active'
         })
 
-        const messagesRef = ref(db, `rooms/${roomId}/messages`)
+        const messagesRef = ref(db, `sessions/${roomId}/messages`)
         await push(messagesRef, {
-          playerId: 0,
+          playerId: 'system',
           senderName: 'SYSTEM',
           text: `${nickname} launched ${game.title}! Duel begins now!`,
           timestamp: Date.now()
@@ -205,6 +213,7 @@ export default function LobbyView() {
     setInputText('')
     const newMsg = {
       playerId,
+      userPlayerId,
       senderName: nickname,
       color: playerId === 1 ? 'text-[#00f5d4]' : 'text-[#ffade6]',
       text,
@@ -213,7 +222,7 @@ export default function LobbyView() {
 
     if (roomId) {
       try {
-        const messagesRef = ref(db, `rooms/${roomId}/messages`)
+        const messagesRef = ref(db, `sessions/${roomId}/messages`)
         await push(messagesRef, newMsg)
       } catch (err) {
         console.warn('Send message error:', err)

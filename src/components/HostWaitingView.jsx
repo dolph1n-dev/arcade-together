@@ -3,6 +3,7 @@ import { ArrowLeft, Copy, Share2, Check, CheckCircle2, User, Sparkles, AlertCirc
 import { useStore } from '../store'
 import { db } from '../lib/firebase'
 import { ref, onValue, update } from 'firebase/database'
+import { setupPresenceTracker } from '../lib/session'
 
 export default function HostWaitingView() {
   const { roomId, nickname, setNickname, setRoom, resetRoom, setOpponentNickname } = useStore()
@@ -10,23 +11,29 @@ export default function HostWaitingView() {
   const [editingNick, setEditingNick] = useState(false)
   const [tempNick, setTempNick] = useState(nickname)
 
-  // Listen for guest joining
+  // Track presence for playerA and listen for playerB joining
   useEffect(() => {
     if (!roomId) return
 
-    const roomRef = ref(db, `rooms/${roomId}`)
-    const unsubscribe = onValue(roomRef, (snapshot) => {
+    // Presence setup
+    const cleanupPresence = setupPresenceTracker(roomId, 'playerA')
+
+    const sessionRef = ref(db, `sessions/${roomId}`)
+    const unsubscribe = onValue(sessionRef, (snapshot) => {
       const data = snapshot.val()
-      if (data && data.guestReady) {
-        if (data.guestNickname) {
-          setOpponentNickname(data.guestNickname)
+      if (data && data.players?.playerB && data.status === 'active') {
+        if (data.players.playerB.nickname) {
+          setOpponentNickname(data.players.playerB.nickname)
         }
-        // Guest joined! Transition seamlessly into the lobby!
+        // Player B connected! Deterministic transition into lobby (Rule 1, 11)
         setRoom(roomId, 1, 'text-primary-container', 'connected', 'lobby')
       }
     })
 
-    return () => unsubscribe()
+    return () => {
+      cleanupPresence()
+      unsubscribe()
+    }
   }, [roomId, setRoom, setOpponentNickname])
 
   const handleCopyCode = () => {
@@ -58,8 +65,8 @@ export default function HostWaitingView() {
     setEditingNick(false)
     if (roomId) {
       try {
-        const roomRef = ref(db, `rooms/${roomId}`)
-        await update(roomRef, { hostNickname: clean })
+        const playerRef = ref(db, `sessions/${roomId}/players/playerA`)
+        await update(playerRef, { nickname: clean })
       } catch (err) {
         console.warn('Update nickname error:', err)
       }

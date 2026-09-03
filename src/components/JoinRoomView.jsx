@@ -2,10 +2,11 @@ import { useState, useRef } from 'react'
 import { ArrowLeft, ArrowRight, LogIn, User, HelpCircle, AlertCircle } from 'lucide-react'
 import { useStore } from '../store'
 import { db } from '../lib/firebase'
-import { ref, get, update, push } from 'firebase/database'
+import { ref, get, push, runTransaction } from 'firebase/database'
+import { setupPresenceTracker } from '../lib/session'
 
 export default function JoinRoomView() {
-  const { nickname, setNickname, setRoom, setView, setOpponentNickname } = useStore()
+  const { nickname, userPlayerId, setNickname, setRoom, setView, setOpponentNickname } = useStore()
   const [nick, setNick] = useState(nickname || 'CyberPlayer')
   const [codeSlots, setCodeSlots] = useState(['', '', '', '', ''])
   const [errorMsg, setErrorMsg] = useState('')
@@ -67,46 +68,87 @@ export default function JoinRoomView() {
     setIsConnecting(true)
 
     try {
-      const roomRef = ref(db, `rooms/${fullCode}`)
-      const snapshot = await get(roomRef)
+      const sessionRef = ref(db, `sessions/${fullCode}`)
+      
+      // Atomic Slot Claim via Firebase Transaction (Rule 10 & 11)
+      const txnResult = await runTransaction(sessionRef, (currentSession) => {
+        if (!currentSession) {
+          // Room does not exist; abort transaction
+          return
+        }
 
-      if (!snapshot.exists()) {
-        setErrorMsg('Invalid room code! Please check with your friend.')
-        setIsConnecting(false)
-        return
-      }
+        if (currentSession.status === 'closed' || currentSession.status === 'abandoned') {
+          // Closed room; abort
+          return
+        }
 
-      const roomData = snapshot.val()
-      if (roomData.guestReady) {
-        setErrorMsg('This room is already full with 2 players!')
-        setIsConnecting(false)
-        return
-      }
+        // Check if playerB is already occupied by another player identity (Rule 2 & 10)
+        if (
+          currentSession.players?.playerB &&
+          currentSession.players.playerB.playerId !== userPlayerId
+        ) {
+          // Slot already taken! Abort transaction to prevent race conditions
+          return
+        }
 
-      // Join room: set guestReady to true and store guest nickname
-      await update(roomRef, {
-        guestReady: true,
-        guestNickname: cleanNick,
+        // Atomically claim playerB slot
+        currentSession.players = currentSession.players || {}
+        currentSession.players.playerB = {
+          playerId: userPlayerId,
+          nickname: cleanNick,
+          slot: 'playerB',
+          connected: true,
+          lastSeen: Date.now()
+        }
+
+        // Deterministic session lifecycle transition: waiting -> active (Rule 1 & 11)
+        currentSession.status = 'active'
+        currentSession.updatedAt = Date.now()
+
+        return currentSession
       })
 
-      // Send system message
-      const messagesRef = ref(db, `rooms/${fullCode}/messages`)
+      if (!txnResult.committed) {
+        // Find out why transaction was aborted
+        const checkSnap = await get(sessionRef)
+        if (!checkSnap.exists()) {
+          setErrorMsg('Invalid room code! Please check with your friend.')
+        } else {
+          const data = checkSnap.val()
+          if (data.players?.playerB && data.players.playerB.playerId !== userPlayerId) {
+            setErrorMsg('This room is already full with 2 players!')
+          } else if (data.status === 'closed' || data.status === 'abandoned') {
+            setErrorMsg('This room is no longer active.')
+          } else {
+            setErrorMsg('Could not join room. Please try again.')
+          }
+        }
+        setIsConnecting(false)
+        return
+      }
+
+      const updatedData = txnResult.snapshot.val()
+      if (updatedData.players?.playerA?.nickname) {
+        setOpponentNickname(updatedData.players.playerA.nickname)
+      }
+
+      // Setup presence tracking for playerB
+      setupPresenceTracker(fullCode, 'playerB')
+
+      // Push system message to session
+      const messagesRef = ref(db, `sessions/${fullCode}/messages`)
       await push(messagesRef, {
-        playerId: 0,
+        playerId: 'system',
         senderName: 'SYSTEM',
-        text: `${cleanNick} (P2) has joined the duel arena!`,
+        text: `${cleanNick} (P2 Rival) has joined the duel arena!`,
         timestamp: Date.now(),
       })
-
-      if (roomData.hostNickname) {
-        setOpponentNickname(roomData.hostNickname)
-      }
 
       // Enter lobby as Player 2 (Magenta)
       setRoom(fullCode, 2, 'text-secondary', 'connected', 'lobby')
     } catch (err) {
       console.warn('Join error:', err)
-      setErrorMsg('Failed to connect to Firebase. Please try again.')
+      setErrorMsg('Failed to connect to Firebase. Please check your network.')
     } finally {
       setIsConnecting(false)
     }

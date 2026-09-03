@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { PlusSquare, Key, ArrowRight, User, Sparkles, Check } from 'lucide-react'
 import { useStore } from '../store'
 import { db } from '../lib/firebase'
-import { ref, set } from 'firebase/database'
+import { ref, set, serverTimestamp } from 'firebase/database'
+import { setupPresenceTracker } from '../lib/session'
 
 export default function HomeView() {
-  const { nickname, setNickname, setRoom, setView } = useStore()
+  const { nickname, userPlayerId, setNickname, setRoom, setView } = useStore()
   const [editingNick, setEditingNick] = useState(false)
   const [tempNick, setTempNick] = useState(nickname)
   const [isCreating, setIsCreating] = useState(false)
@@ -23,30 +24,53 @@ export default function HomeView() {
   const handleHost = async () => {
     setIsCreating(true)
     const code = generate5CharCode()
-    const roomRef = ref(db, `rooms/${code}`)
+    const sessionRef = ref(db, `sessions/${code}`)
 
     try {
-      await set(roomRef, {
-        hostReady: true,
-        guestReady: false,
-        hostNickname: nickname || 'CyberKnight',
-        guestNickname: '',
-        createdAt: Date.now(),
-        selectedGame: null,
-        activeGame: null,
-        scores: { p1: 0, p2: 0 },
+      // Create session under authoritative schema (Rule 1, 2, 14, 16)
+      await set(sessionRef, {
+        sessionId: code,
+        status: 'waiting',
+        gameType: null,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        hostPlayerId: userPlayerId,
+        players: {
+          playerA: {
+            playerId: userPlayerId,
+            nickname: nickname || 'CyberKnight',
+            slot: 'playerA',
+            connected: true,
+            lastSeen: serverTimestamp()
+          }
+        },
+        game: {
+          type: 'tictactoe',
+          status: 'active',
+          board: ['', '', '', '', '', '', '', '', ''],
+          turn: 'playerA',
+          version: 1,
+          winner: null,
+          winningLine: null,
+          scores: { playerA: 0, playerB: 0 },
+          rematchRequests: { playerA: false, playerB: false },
+          lastActionId: 'init'
+        },
         messages: {
           init: {
             id: 'init',
-            playerId: 0,
+            playerId: 'system',
             senderName: 'SYSTEM',
-            text: `Room created by ${nickname || 'CyberKnight'}. Waiting for opponent...`,
+            text: `Room created by ${nickname || 'CyberKnight'}. Waiting for rival to connect...`,
             timestamp: Date.now()
           }
         }
       })
+
+      // Setup presence for playerA
+      setupPresenceTracker(code, 'playerA')
     } catch (err) {
-      console.warn('Firebase sync warning:', err)
+      console.warn('Firebase session creation warning:', err)
     } finally {
       setIsCreating(false)
       setRoom(code, 1, 'text-primary-container', 'waiting', 'host_waiting')

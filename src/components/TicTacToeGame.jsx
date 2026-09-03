@@ -1,58 +1,106 @@
-import { useState, useEffect } from 'react'
-import { ArrowLeft, Timer, Flag, RotateCcw, Wifi, Trophy, Zap } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { ArrowLeft, Timer, Flag, RotateCcw, Wifi, Trophy, Zap, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import confetti from 'canvas-confetti'
 import { useStore } from '../store'
 import { db } from '../lib/firebase'
-import { ref, onValue, update, push } from 'firebase/database'
-
-const WINNING_COMBOS = [
-  [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
-  [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
-  [0, 4, 8], [2, 4, 6],           // Diagonals
-]
+import { ref, onValue, update, push, runTransaction } from 'firebase/database'
+import { 
+  checkTicTacToeWin, 
+  generateActionId, 
+  setupPresenceTracker 
+} from '../lib/session'
 
 export default function TicTacToeGame() {
   const { 
     roomId, 
     playerId, 
+    playerSlot,
     nickname, 
     opponentNickname, 
     setView, 
     setActiveGame 
   } = useStore()
 
-  const [board, setBoard] = useState(Array(9).fill(null))
-  const [turn, setTurn] = useState(1) // 1 for P1 (X), 2 for P2 (O)
-  const [winner, setWinner] = useState(null) // 1, 2, 'draw', or null
+  // My authoritative slot: 'playerA' (Host / Cyan / X) or 'playerB' (Rival / Magenta / O)
+  const mySlot = playerSlot || (playerId === 1 ? 'playerA' : 'playerB')
+  const opponentSlot = mySlot === 'playerA' ? 'playerB' : 'playerA'
+  const myNumericId = mySlot === 'playerA' ? 1 : 2
+  const mySymbol = mySlot === 'playerA' ? 'X' : 'O'
+
+  // Authoritative State (Rule 1, 4, 14)
+  const [board, setBoard] = useState(Array(9).fill(''))
+  const [turn, setTurn] = useState('playerA') // 'playerA' | 'playerB'
+  const [gameStatus, setGameStatus] = useState('active') // 'active' | 'finished'
+  const [winner, setWinner] = useState(null) // 'playerA' | 'playerB' | 'draw' | null
   const [winningLine, setWinningLine] = useState(null)
-  const [scores, setScores] = useState({ p1: 0, p2: 0 })
+  const [scores, setScores] = useState({ playerA: 0, playerB: 0 })
+  const [rematchRequests, setRematchRequests] = useState({ playerA: false, playerB: false })
   const [timeLeft, setTimeLeft] = useState(15)
   const [reactionToast, setReactionToast] = useState(null)
+  const [opponentOnline, setOpponentOnline] = useState(true)
 
-  // Listen to live game state in Firebase
+  // Monotonic version tracking (Rule 5 & 15)
+  const lastVersionRef = useRef(0)
+
+  // 1. Synchronize Game State & Presence
   useEffect(() => {
     if (!roomId) return
 
-    const gameRef = ref(db, `rooms/${roomId}/game`)
+    // Setup presence tracking with grace period awareness (Rule 8 & 9)
+    const cleanupPresence = setupPresenceTracker(roomId, mySlot, (opponentPresence) => {
+      setOpponentOnline(opponentPresence?.connected ?? true)
+    })
+
+    const gameRef = ref(db, `sessions/${roomId}/game`)
     const unsubscribe = onValue(gameRef, (snapshot) => {
       const data = snapshot.val()
       if (data) {
-        if (data.board) setBoard(data.board)
-        if (data.turn) {
-          setTurn(data.turn)
+        // Monotonically increasing version check (Rule 5)
+        if (data.version && data.version < lastVersionRef.current) {
+          return // Ignore stale or out-of-order state
         }
+        if (data.version) {
+          lastVersionRef.current = data.version
+        }
+
+        // Normalize 9-element string board (Never nulls to prevent Firebase node deletion)
+        const rawBoard = data.board
+        const safeBoard = Array.isArray(rawBoard)
+          ? rawBoard.map((c) => (c ? String(c) : ''))
+          : rawBoard && typeof rawBoard === 'object'
+          ? Array(9).fill('').map((_, i) => rawBoard[i] || '')
+          : Array(9).fill('')
+
+        while (safeBoard.length < 9) safeBoard.push('')
+
+        setBoard(safeBoard)
+        setTurn(data.turn || 'playerA')
+        setGameStatus(data.status || 'active')
         setWinner(data.winner || null)
         setWinningLine(data.winningLine || null)
-        if (data.scores) setScores(data.scores)
 
-        // Check if returning to lobby was triggered
-        if (data.gameStatus === 'exit_lobby') {
+        if (data.scores) {
+          setScores({
+            playerA: Number(data.scores.playerA || 0),
+            playerB: Number(data.scores.playerB || 0)
+          })
+        }
+
+        if (data.rematchRequests) {
+          setRematchRequests({
+            playerA: !!data.rematchRequests.playerA,
+            playerB: !!data.rematchRequests.playerB
+          })
+        }
+
+        // Return to lobby synchronized signal
+        if (data.status === 'exit_lobby') {
           setActiveGame(null)
           setView('lobby')
         }
 
         // Trigger confetti for winner
-        if (data.winner === playerId) {
+        if (data.winner === mySlot) {
           confetti({
             particleCount: 80,
             spread: 70,
@@ -61,135 +109,216 @@ export default function TicTacToeGame() {
           })
         }
       } else {
-        // Initialize game in Firebase if not present
+        // Initialize authoritative game node in Firebase if not yet seeded
         update(gameRef, {
-          board: Array(9).fill(null),
-          turn: 1,
+          type: 'tictactoe',
+          status: 'active',
+          board: Array(9).fill(''),
+          turn: 'playerA',
+          version: 1,
           winner: null,
           winningLine: null,
-          scores: { p1: 0, p2: 0 },
-          gameStatus: 'active'
+          scores: { playerA: 0, playerB: 0 },
+          rematchRequests: { playerA: false, playerB: false },
+          lastActionId: 'init'
         })
       }
     })
 
-    return () => unsubscribe()
-  }, [roomId, playerId, setActiveGame, setView])
+    // Also listen to session root for lobby exit
+    const sessionRef = ref(db, `sessions/${roomId}`)
+    const unsubSession = onValue(sessionRef, (snapshot) => {
+      const sess = snapshot.val()
+      if (sess && sess.activeGame === null && sess.status === 'active') {
+        setActiveGame(null)
+        setView('lobby')
+      }
+    })
 
-  // Turn timer countdown
+    return () => {
+      cleanupPresence()
+      unsubscribe()
+      unsubSession()
+    }
+  }, [roomId, mySlot, setActiveGame, setView])
+
+  // 2. Turn Timer
   useEffect(() => {
-    if (winner) return
+    if (winner || gameStatus !== 'active') return
+
     const interval = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          return 15
-        }
-        return prev - 1
-      })
+      setTimeLeft((prev) => (prev <= 1 ? 15 : prev - 1))
     }, 1000)
 
     return () => clearInterval(interval)
-  }, [turn, winner])
+  }, [winner, gameStatus])
 
-  const checkWinner = (currentBoard) => {
-    for (const combo of WINNING_COMBOS) {
-      const [a, b, c] = combo
-      if (
-        currentBoard[a] &&
-        currentBoard[a] === currentBoard[b] &&
-        currentBoard[a] === currentBoard[c]
-      ) {
-        return {
-          winner: currentBoard[a] === 'X' ? 1 : 2,
-          line: combo,
-        }
-      }
-    }
-    if (currentBoard.every((cell) => cell !== null)) {
-      return { winner: 'draw', line: null }
-    }
-    return null
-  }
-
+  // 3. Authoritative Atomic Move via Firebase Transaction (Rule 3, 4, 6, 12, 13)
   const handleCellClick = async (index) => {
-    // Only allow click if it's the player's turn, cell is empty, and game is active
-    if (board[index] !== null || winner || turn !== playerId) return
-
-    const mySymbol = playerId === 1 ? 'X' : 'O'
-    const newBoard = [...board]
-    newBoard[index] = mySymbol
-
-    const result = checkWinner(newBoard)
-    const nextTurn = playerId === 1 ? 2 : 1
-    const newScores = { ...scores }
-
-    let winState = null
-    let winCombo = null
-
-    if (result) {
-      winState = result.winner
-      winCombo = result.line
-      if (result.winner === 1) newScores.p1 += 1
-      if (result.winner === 2) newScores.p2 += 1
+    // Fast client pre-check
+    if (board[index] !== '' || winner || gameStatus !== 'active' || turn !== mySlot) {
+      return
     }
+
+    const actionId = generateActionId('move')
+    const gameRef = ref(db, `sessions/${roomId}/game`)
 
     try {
-      const gameRef = ref(db, `rooms/${roomId}/game`)
-      await update(gameRef, {
-        board: newBoard,
-        turn: nextTurn,
-        winner: winState,
-        winningLine: winCombo,
-        scores: newScores,
-        lastMoveAt: Date.now()
+      await runTransaction(gameRef, (currentGame) => {
+        if (!currentGame) return
+
+        // 1. Authoritative checks
+        if (currentGame.status !== 'active') return // Game is finished or closed
+        if (currentGame.winner) return // Already concluded
+        if (currentGame.turn !== mySlot) return // Not this player's turn!
+        if (currentGame.lastActionId === actionId) return // Idempotency check
+
+        // Normalize current board in transaction
+        const currentBoard = Array.isArray(currentGame.board)
+          ? [...currentGame.board]
+          : currentGame.board && typeof currentGame.board === 'object'
+          ? Array(9).fill('').map((_, i) => currentGame.board[i] || '')
+          : Array(9).fill('')
+
+        while (currentBoard.length < 9) currentBoard.push('')
+
+        // 2. Verify cell is strictly empty
+        if (currentBoard[index] && currentBoard[index] !== '') {
+          return // Cell already occupied!
+        }
+
+        // 3. Apply move
+        currentBoard[index] = mySymbol
+        currentGame.board = currentBoard
+        currentGame.lastActionId = actionId
+        currentGame.version = (currentGame.version || 0) + 1
+
+        // 4. Authoritative Win / Draw Evaluation
+        const winResult = checkTicTacToeWin(currentBoard)
+        const currentScores = currentGame.scores || { playerA: 0, playerB: 0 }
+
+        if (winResult) {
+          currentGame.winner = winResult.winner // 'playerA' | 'playerB' | 'draw'
+          currentGame.winningLine = winResult.line || null
+          currentGame.status = 'finished'
+          currentGame.finishedAt = Date.now()
+
+          if (winResult.winner === 'playerA') {
+            currentScores.playerA = Number(currentScores.playerA || 0) + 1
+          } else if (winResult.winner === 'playerB') {
+            currentScores.playerB = Number(currentScores.playerB || 0) + 1
+          }
+          currentGame.scores = currentScores
+        } else {
+          // Flip turn
+          currentGame.turn = mySlot === 'playerA' ? 'playerB' : 'playerA'
+          currentGame.status = 'active'
+        }
+
+        // Reset rematch votes when new active moves are played
+        currentGame.rematchRequests = { playerA: false, playerB: false }
+
+        return currentGame
       })
     } catch (err) {
-      console.warn('Move sync warning:', err)
+      console.warn('Move transaction error:', err)
     }
   }
 
+  // 4. Authoritative Rematch State Machine (Rule 23)
   const handleRematch = async () => {
+    const gameRef = ref(db, `sessions/${roomId}/game`)
+
     try {
-      const gameRef = ref(db, `rooms/${roomId}/game`)
-      await update(gameRef, {
-        board: Array(9).fill(null),
-        turn: winner === 1 ? 2 : 1, // Alternate start
-        winner: null,
-        winningLine: null,
+      await runTransaction(gameRef, (currentGame) => {
+        if (!currentGame) return
+
+        currentGame.rematchRequests = currentGame.rematchRequests || { playerA: false, playerB: false }
+        currentGame.rematchRequests[mySlot] = true
+
+        const otherAgreed = !!currentGame.rematchRequests[opponentSlot]
+
+        // If other player already agreed OR in single-player test mode, reset board atomically
+        if (otherAgreed) {
+          // Reset board to 9 empty strings
+          currentGame.board = Array(9).fill('')
+          // Alternate starting turn for fairness
+          currentGame.turn = currentGame.winner === 'playerA' ? 'playerB' : 'playerA'
+          currentGame.winner = null
+          currentGame.winningLine = null
+          currentGame.status = 'active'
+          currentGame.rematchRequests = { playerA: false, playerB: false }
+          currentGame.version = (currentGame.version || 0) + 1
+          currentGame.lastActionId = generateActionId('rematch_reset')
+        }
+
+        return currentGame
       })
 
       // Send chat notification
-      const messagesRef = ref(db, `rooms/${roomId}/messages`)
+      const messagesRef = ref(db, `sessions/${roomId}/messages`)
       await push(messagesRef, {
-        playerId: 0,
-        senderName: 'SYSTEM',
-        text: `Rematch started by ${nickname}!`,
+        playerId: mySlot,
+        senderName: nickname,
+        text: `Requested a rematch!`,
         timestamp: Date.now(),
       })
     } catch (err) {
-      console.warn('Rematch error:', err)
+      console.warn('Rematch transaction error:', err)
     }
   }
 
-  const handleSurrender = async () => {
-    if (winner) return
-    const opponentId = playerId === 1 ? 2 : 1
-    const newScores = { ...scores }
-    if (opponentId === 1) newScores.p1 += 1
-    if (opponentId === 2) newScores.p2 += 1
-
+  // Force-start rematch if opponent is taking time or for instant test reset
+  const handleForceReset = async () => {
+    const gameRef = ref(db, `sessions/${roomId}/game`)
     try {
-      const gameRef = ref(db, `rooms/${roomId}/game`)
-      await update(gameRef, {
-        winner: opponentId,
-        scores: newScores
+      await runTransaction(gameRef, (currentGame) => {
+        if (!currentGame) return
+        currentGame.board = Array(9).fill('')
+        currentGame.turn = mySlot
+        currentGame.winner = null
+        currentGame.winningLine = null
+        currentGame.status = 'active'
+        currentGame.rematchRequests = { playerA: false, playerB: false }
+        currentGame.version = (currentGame.version || 0) + 1
+        currentGame.lastActionId = generateActionId('force_reset')
+        return currentGame
+      })
+    } catch (err) {
+      console.warn('Force reset error:', err)
+    }
+  }
+
+  // 5. Forfeit Match (Rule 12)
+  const handleSurrender = async () => {
+    if (winner || gameStatus !== 'active') return
+
+    const gameRef = ref(db, `sessions/${roomId}/game`)
+    try {
+      await runTransaction(gameRef, (currentGame) => {
+        if (!currentGame || currentGame.status !== 'active') return
+
+        const currentScores = currentGame.scores || { playerA: 0, playerB: 0 }
+        currentGame.winner = opponentSlot
+        currentGame.status = 'finished'
+        currentGame.finishedAt = Date.now()
+        currentGame.version = (currentGame.version || 0) + 1
+
+        if (opponentSlot === 'playerA') {
+          currentScores.playerA = Number(currentScores.playerA || 0) + 1
+        } else {
+          currentScores.playerB = Number(currentScores.playerB || 0) + 1
+        }
+        currentGame.scores = currentScores
+
+        return currentGame
       })
 
-      const messagesRef = ref(db, `rooms/${roomId}/messages`)
+      const messagesRef = ref(db, `sessions/${roomId}/messages`)
       await push(messagesRef, {
-        playerId: 0,
+        playerId: 'system',
         senderName: 'SYSTEM',
-        text: `${nickname} forfeited the match. ${opponentNickname || 'Opponent'} wins!`,
+        text: `${nickname} surrendered. ${opponentNickname || 'Opponent'} wins!`,
         timestamp: Date.now(),
       })
     } catch (err) {
@@ -197,10 +326,14 @@ export default function TicTacToeGame() {
     }
   }
 
+  // 6. Return to Lobby
   const handleExitToLobby = async () => {
     try {
-      const gameRef = ref(db, `rooms/${roomId}/game`)
-      await update(gameRef, { gameStatus: 'exit_lobby' })
+      const sessionRef = ref(db, `sessions/${roomId}`)
+      await update(sessionRef, {
+        activeGame: null,
+        'game/status': 'exit_lobby'
+      })
     } catch (err) {
       console.warn('Exit error:', err)
     } finally {
@@ -215,9 +348,9 @@ export default function TicTacToeGame() {
 
     if (roomId) {
       try {
-        const messagesRef = ref(db, `rooms/${roomId}/messages`)
+        const messagesRef = ref(db, `sessions/${roomId}/messages`)
         await push(messagesRef, {
-          playerId,
+          playerId: myNumericId,
           senderName: nickname,
           text: reactionText,
           timestamp: Date.now(),
@@ -228,18 +361,30 @@ export default function TicTacToeGame() {
     }
   }
 
-  const isMyTurn = turn === playerId
-  const mySymbol = playerId === 1 ? 'X' : 'O'
+  const isMyTurn = turn === mySlot && !winner && gameStatus === 'active'
+  const myRematchVote = rematchRequests[mySlot]
+  const opponentRematchVote = rematchRequests[opponentSlot]
 
   return (
     <main className="relative z-10 flex-1 max-w-[1440px] mx-auto w-full px-4 sm:px-6 py-4 md:py-6 flex flex-col justify-between">
+      {/* 0. DISCONNECT / GRACE PERIOD BANNER */}
+      {!opponentOnline && (
+        <div className="w-full mb-3 bg-[#ffb4ab]/10 border border-[#ffb4ab]/40 rounded-xl px-4 py-2 flex items-center justify-between text-xs font-mono text-[#ffb4ab]">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-[#ffb4ab] animate-pulse" />
+            <span>Rival connection dropped. Waiting for reconnection (grace period active)...</span>
+          </div>
+          <span className="text-[10px] text-[#83948f]">Session preserved</span>
+        </div>
+      )}
+
       {/* 1. DUO POLARITY HEADER */}
       <section className="w-full mb-4 md:mb-6">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
-          {/* P1 Card: CYAN NEON */}
+          {/* P1 Card: CYAN NEON (Host / Player A) */}
           <div
             className={`md:col-span-4 rounded-xl p-4 transition-all duration-300 relative overflow-hidden bg-[#1a1b24]/85 backdrop-blur-md border ${
-              turn === 1 && !winner
+              turn === 'playerA' && !winner
                 ? 'border-[#00f5d4] shadow-[0_0_20px_rgba(0,245,212,0.4),inset_0_0_12px_rgba(0,245,212,0.2)]'
                 : 'border-[#3a4a46]/40'
             }`}
@@ -249,18 +394,18 @@ export default function TicTacToeGame() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="font-['Space_Grotesk'] text-base font-bold text-[#00f5d4]">
-                      {playerId === 1 ? `${nickname} (You)` : opponentNickname || 'Player 1'}
+                      {mySlot === 'playerA' ? `${nickname} (You)` : opponentNickname || 'Player 1'}
                     </span>
                     <span className="px-1.5 py-0.5 text-[9px] font-mono rounded bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 font-bold">
-                      HOST
+                      P1 • HOST
                     </span>
                   </div>
-                  {/* Status */}
+                  {/* Turn Status */}
                   <div className="mt-1 flex items-center gap-1.5 text-xs font-mono">
-                    {turn === 1 && !winner ? (
+                    {turn === 'playerA' && !winner ? (
                       <span className="text-[#00f5d4] font-bold flex items-center gap-1">
                         <span className="w-2 h-2 rounded-full bg-[#00f5d4] animate-ping" />
-                        {playerId === 1 ? 'YOUR TURN!' : "HOST'S TURN"}
+                        {mySlot === 'playerA' ? 'YOUR TURN!' : "HOST'S TURN"}
                       </span>
                     ) : (
                       <span className="text-[#83948f]">Waiting...</span>
@@ -273,14 +418,14 @@ export default function TicTacToeGame() {
               <div className="text-right">
                 <span className="font-mono text-[10px] text-[#83948f] block uppercase">SCORE</span>
                 <span className="font-['Space_Grotesk'] text-3xl font-bold text-[#00f5d4] glow-cyan-intense leading-none">
-                  {scores.p1}
+                  {scores.playerA}
                 </span>
               </div>
             </div>
 
             <div className="mt-2 pt-2 border-t border-[#00f5d4]/20 flex justify-between items-center text-xs font-mono text-[#83948f]">
               <span className="flex items-center gap-1 text-[#00f5d4]">
-                <Wifi className="w-3.5 h-3.5" /> 18ms
+                <Wifi className="w-3.5 h-3.5" /> ONLINE
               </span>
               <span>
                 Symbol: <strong className="text-[#00f5d4] font-bold text-sm">X</strong>
@@ -292,7 +437,7 @@ export default function TicTacToeGame() {
           <div className="md:col-span-4 flex flex-col items-center justify-center py-1">
             <div className="flex items-center justify-center gap-4 my-1">
               <span className="font-['Space_Grotesk'] text-3xl font-bold text-[#00f5d4] glow-cyan-intense">
-                {scores.p1}
+                {scores.playerA}
               </span>
               <div className="relative w-11 h-11 flex items-center justify-center">
                 <div className="absolute inset-0 rounded-full border border-[#3a4a46]/80 bg-[#1e1f29]/90 shadow-[0_0_16px_rgba(0,245,212,0.2)]" />
@@ -301,7 +446,7 @@ export default function TicTacToeGame() {
                 </span>
               </div>
               <span className="font-['Space_Grotesk'] text-3xl font-bold text-[#ffade6] glow-magenta-intense">
-                {scores.p2}
+                {scores.playerB}
               </span>
             </div>
 
@@ -315,10 +460,10 @@ export default function TicTacToeGame() {
             </div>
           </div>
 
-          {/* P2 Card: MAGENTA NEON */}
+          {/* P2 Card: MAGENTA NEON (Guest / Player B) */}
           <div
             className={`md:col-span-4 rounded-xl p-4 transition-all duration-300 relative overflow-hidden bg-[#1a1b24]/85 backdrop-blur-md border ${
-              turn === 2 && !winner
+              turn === 'playerB' && !winner
                 ? 'border-[#ffade6] shadow-[0_0_20px_rgba(181,23,158,0.4),inset_0_0_12px_rgba(181,23,158,0.2)]'
                 : 'border-[#3a4a46]/40'
             }`}
@@ -328,25 +473,25 @@ export default function TicTacToeGame() {
               <div className="text-left">
                 <span className="font-mono text-[10px] text-[#83948f] block uppercase">SCORE</span>
                 <span className="font-['Space_Grotesk'] text-3xl font-bold text-[#ffade6] glow-magenta-intense leading-none">
-                  {scores.p2}
+                  {scores.playerB}
                 </span>
               </div>
 
               <div className="text-right">
                 <div className="flex items-center justify-end gap-2">
                   <span className="px-1.5 py-0.5 text-[9px] font-mono rounded bg-[#aa0094]/30 text-[#ffd7ef] border border-[#ffade6]/30 font-bold">
-                    RIVAL
+                    P2 • RIVAL
                   </span>
                   <span className="font-['Space_Grotesk'] text-base font-bold text-[#ffade6]">
-                    {playerId === 2 ? `${nickname} (You)` : opponentNickname || 'Player 2'}
+                    {mySlot === 'playerB' ? `${nickname} (You)` : opponentNickname || 'Player 2'}
                   </span>
                 </div>
                 {/* Status */}
                 <div className="mt-1 flex items-center justify-end gap-1.5 text-xs font-mono">
-                  {turn === 2 && !winner ? (
+                  {turn === 'playerB' && !winner ? (
                     <span className="text-[#ffade6] font-bold flex items-center gap-1">
                       <span className="w-2 h-2 rounded-full bg-[#ffade6] animate-ping" />
-                      {playerId === 2 ? 'YOUR TURN!' : "RIVAL'S TURN"}
+                      {mySlot === 'playerB' ? 'YOUR TURN!' : "RIVAL'S TURN"}
                     </span>
                   ) : (
                     <span className="text-[#83948f]">Waiting...</span>
@@ -359,8 +504,8 @@ export default function TicTacToeGame() {
               <span>
                 Symbol: <strong className="text-[#ffade6] font-bold text-sm">O</strong>
               </span>
-              <span className="flex items-center gap-1 text-[#ffade6]">
-                <Wifi className="w-3.5 h-3.5" /> 34ms
+              <span className={`flex items-center gap-1 ${opponentOnline ? 'text-[#ffade6]' : 'text-[#ffb4ab]'}`}>
+                <Wifi className="w-3.5 h-3.5" /> {opponentOnline ? 'ONLINE' : 'AWAY'}
               </span>
             </div>
           </div>
@@ -385,7 +530,7 @@ export default function TicTacToeGame() {
                 <button
                   key={index}
                   onClick={() => handleCellClick(index)}
-                  disabled={cell !== null || !!winner || !isMyTurn}
+                  disabled={cell !== '' || !!winner || !isMyTurn}
                   aria-label={`Cell ${index + 1}`}
                   className={`relative rounded-xl border flex items-center justify-center transition-all duration-200 select-none ${
                     cell === 'X'
@@ -419,7 +564,7 @@ export default function TicTacToeGame() {
         </div>
 
         {/* Winner Announcement or Turn Helper */}
-        <div className="mt-4">
+        <div className="mt-4 flex flex-col items-center gap-2">
           {winner ? (
             <div className="flex flex-col items-center gap-2">
               <div className="inline-flex items-center gap-2 px-5 py-2 rounded-full font-mono text-sm font-bold bg-[#1e1f29] border border-[#00f5d4] shadow-[0_0_18px_rgba(0,245,212,0.4)] text-white">
@@ -427,10 +572,24 @@ export default function TicTacToeGame() {
                 <span>
                   {winner === 'draw'
                     ? "It's a Stalemate Draw!"
-                    : winner === playerId
+                    : winner === mySlot
                     ? 'Victory! You Won the Match!'
                     : 'Opponent Won! Good Game!'}
                 </span>
+              </div>
+
+              {/* Rematch Status Indicator */}
+              <div className="flex items-center gap-2 text-xs font-mono">
+                {myRematchVote && !opponentRematchVote && (
+                  <span className="text-[#00f5d4] flex items-center gap-1 bg-[#00f5d4]/10 px-3 py-1 rounded-full border border-[#00f5d4]/30">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> You requested rematch (Waiting for rival...)
+                  </span>
+                )}
+                {!myRematchVote && opponentRematchVote && (
+                  <span className="text-[#ffade6] flex items-center gap-1 bg-[#ffade6]/10 px-3 py-1 rounded-full border border-[#ffade6]/30 animate-pulse">
+                    <Zap className="w-3.5 h-3.5" /> Rival wants a rematch! Click Rematch to Accept!
+                  </span>
+                )}
               </div>
             </div>
           ) : (
@@ -465,13 +624,37 @@ export default function TicTacToeGame() {
               <span>Forfeit</span>
             </button>
 
+            {/* Authoritative Rematch Button */}
             <button
               onClick={handleRematch}
-              className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[#00f5d4] hover:bg-[#26fedc] text-[#00201a] font-['Space_Grotesk'] font-bold text-xs shadow-[0_0_15px_rgba(0,245,212,0.35)] hover:shadow-[0_0_25px_rgba(0,245,212,0.6)] transition-all active:scale-95 cursor-pointer"
+              className={`flex items-center gap-2 px-5 py-2 rounded-lg font-['Space_Grotesk'] font-bold text-xs transition-all active:scale-95 cursor-pointer ${
+                myRematchVote
+                  ? 'bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/50'
+                  : opponentRematchVote
+                  ? 'bg-[#ffade6] hover:bg-[#ffc2ee] text-[#12131c] shadow-[0_0_20px_rgba(255,173,230,0.6)] animate-bounce'
+                  : 'bg-[#00f5d4] hover:bg-[#26fedc] text-[#00201a] shadow-[0_0_15px_rgba(0,245,212,0.35)]'
+              }`}
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              <span>Rematch</span>
+              <span>
+                {myRematchVote 
+                  ? 'Rematch Voted (1/2)' 
+                  : opponentRematchVote 
+                  ? 'Accept Rematch!' 
+                  : 'Rematch'}
+              </span>
             </button>
+
+            {/* Force Reset helper if solo or testing */}
+            {winner && (
+              <button
+                onClick={handleForceReset}
+                title="Reset board immediately"
+                className="text-[11px] font-mono text-[#83948f] hover:text-[#00f5d4] underline px-2 cursor-pointer"
+              >
+                Instant Reset
+              </button>
+            )}
 
             <button
               onClick={handleExitToLobby}
