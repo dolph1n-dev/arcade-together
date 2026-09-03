@@ -1,0 +1,6 @@
+{
+  "name": "Arcade Together",
+  "description": "Multiplayer arcade gaming lobby and real-time chat platform",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

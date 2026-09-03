@@ -1,9 +1,12 @@
+import { useEffect } from 'react'
 import GameCard from './GameCard'
 import ChatPanel from './ChatPanel'
 import { useStore } from '../store'
+import { db } from '../lib/firebase'
+import { ref, onValue } from 'firebase/database'
 
 export default function Lobby() {
-  const { roomId, playerColor } = useStore()
+  const { roomId, playerColor, resetRoom, setSelectedGame } = useStore()
 
   // Örnek oyun verileri
   const games = [
@@ -13,6 +16,20 @@ export default function Lobby() {
     { id: 'snake', title: 'SNAKE', desc: 'Yılan yarışı' },
   ]
 
+  // Seçilen oyunu Firebase üzerinden diğer oyuncuyla senkronize et
+  useEffect(() => {
+    if (roomId) {
+      const selectedGameRef = ref(db, `rooms/${roomId}/selectedGame`)
+      const unsubscribe = onValue(selectedGameRef, (snapshot) => {
+        const data = snapshot.val()
+        if (data) {
+          setSelectedGame(data)
+        }
+      })
+      return () => unsubscribe()
+    }
+  }, [roomId, setSelectedGame])
+
   return (
     // Mobilde alt alta (flex-col), tablet ve üzeri masaüstünde yan yana (md:flex-row)
     <div className="flex flex-col md:flex-row w-full h-[100dvh] max-w-7xl mx-auto p-2 md:p-4 gap-4 md:gap-6 bg-gray-900">
@@ -20,9 +37,17 @@ export default function Lobby() {
       {/* SOL TARAF: Oyun Listesi (Mobilde üstte) */}
       <div className="flex-1 flex flex-col min-h-[50dvh] overflow-hidden">
         <div className="flex justify-between items-center mb-4 px-2">
-          <h2 className="text-2xl font-bold tracking-wider">LOBİ</h2>
-          <div className="text-sm bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
-            ODA: <span className={`font-bold ${playerColor}`}>{roomId}</span>
+          <h2 className="text-2xl font-bold tracking-wider text-white">LOBİ</h2>
+          <div className="flex items-center gap-3">
+            <div className="text-sm bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
+              ODA: <span className={`font-bold ${playerColor}`}>{roomId}</span>
+            </div>
+            <button
+              onClick={() => resetRoom()}
+              className="text-xs text-gray-400 hover:text-white px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 transition-colors border border-gray-700 cursor-pointer"
+            >
+              Çıkış
+            </button>
           </div>
         </div>
         
