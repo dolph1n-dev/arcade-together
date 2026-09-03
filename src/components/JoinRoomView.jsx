@@ -2,13 +2,23 @@ import { useState, useRef } from 'react'
 import { ArrowLeft, ArrowRight, LogIn, User, HelpCircle, AlertCircle } from 'lucide-react'
 import { useStore } from '../store'
 import { db } from '../lib/firebase'
-import { ref, get, push, runTransaction } from 'firebase/database'
+import { ref, get, push, update } from 'firebase/database'
 import { setupPresenceTracker } from '../lib/session'
 
 export default function JoinRoomView() {
   const { nickname, userPlayerId, setNickname, setRoom, setView, setOpponentNickname } = useStore()
   const [nick, setNick] = useState(nickname || 'CyberPlayer')
-  const [codeSlots, setCodeSlots] = useState(['', '', '', '', ''])
+  const [codeSlots, setCodeSlots] = useState(() => {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const roomParam = params.get('room')
+      if (roomParam && roomParam.length >= 5) {
+        const clean = roomParam.trim().toUpperCase().slice(0, 5)
+        return clean.split('')
+      }
+    } catch {}
+    return ['', '', '', '', '']
+  })
   const [errorMsg, setErrorMsg] = useState('')
   const [isConnecting, setIsConnecting] = useState(false)
   const inputRefs = [useRef(), useRef(), useRef(), useRef(), useRef()]
@@ -70,85 +80,69 @@ export default function JoinRoomView() {
     try {
       const sessionRef = ref(db, `sessions/${fullCode}`)
       
-      // Atomic Slot Claim via Firebase Transaction (Rule 10 & 11)
-      const txnResult = await runTransaction(sessionRef, (currentSession) => {
-        if (!currentSession) {
-          // Room does not exist; abort transaction
-          return
-        }
+      // 1. Fetch current session data from Firebase
+      const snapshot = await get(sessionRef)
 
-        if (currentSession.status === 'closed' || currentSession.status === 'abandoned') {
-          // Closed room; abort
-          return
-        }
+      if (!snapshot.exists()) {
+        setErrorMsg('Invalid room code! Please check with your friend.')
+        setIsConnecting(false)
+        return
+      }
 
-        // Check if playerB is already occupied by another player identity (Rule 2 & 10)
-        if (
-          currentSession.players?.playerB &&
-          currentSession.players.playerB.playerId !== userPlayerId
-        ) {
-          // Slot already taken! Abort transaction to prevent race conditions
-          return
-        }
+      const sessionData = snapshot.val()
 
-        // Atomically claim playerB slot
-        currentSession.players = currentSession.players || {}
-        currentSession.players.playerB = {
+      // 2. Check if room is closed or abandoned
+      if (sessionData.status === 'closed' || sessionData.status === 'abandoned') {
+        setErrorMsg('This room is no longer active.')
+        setIsConnecting(false)
+        return
+      }
+
+      // 3. Check if room is already occupied by a different player
+      if (
+        sessionData.players?.playerB &&
+        sessionData.players.playerB.playerId !== userPlayerId
+      ) {
+        setErrorMsg('This room is already full with 2 players!')
+        setIsConnecting(false)
+        return
+      }
+
+      // 4. Update session: claim playerB slot and activate room
+      await update(sessionRef, {
+        'players/playerB': {
           playerId: userPlayerId,
           nickname: cleanNick,
           slot: 'playerB',
           connected: true,
           lastSeen: Date.now()
-        }
-
-        // Deterministic session lifecycle transition: waiting -> active (Rule 1 & 11)
-        currentSession.status = 'active'
-        currentSession.updatedAt = Date.now()
-
-        return currentSession
+        },
+        status: 'active',
+        updatedAt: Date.now()
       })
 
-      if (!txnResult.committed) {
-        // Find out why transaction was aborted
-        const checkSnap = await get(sessionRef)
-        if (!checkSnap.exists()) {
-          setErrorMsg('Invalid room code! Please check with your friend.')
-        } else {
-          const data = checkSnap.val()
-          if (data.players?.playerB && data.players.playerB.playerId !== userPlayerId) {
-            setErrorMsg('This room is already full with 2 players!')
-          } else if (data.status === 'closed' || data.status === 'abandoned') {
-            setErrorMsg('This room is no longer active.')
-          } else {
-            setErrorMsg('Could not join room. Please try again.')
-          }
-        }
-        setIsConnecting(false)
-        return
+      // 5. Opponent nickname
+      if (sessionData.players?.playerA?.nickname) {
+        setOpponentNickname(sessionData.players.playerA.nickname)
       }
 
-      const updatedData = txnResult.snapshot.val()
-      if (updatedData.players?.playerA?.nickname) {
-        setOpponentNickname(updatedData.players.playerA.nickname)
-      }
-
-      // Setup presence tracking for playerB
+      // 6. Setup presence tracking for playerB
       setupPresenceTracker(fullCode, 'playerB')
 
-      // Push system message to session
+      // 7. Push system announcement
       const messagesRef = ref(db, `sessions/${fullCode}/messages`)
       await push(messagesRef, {
         playerId: 'system',
         senderName: 'SYSTEM',
         text: `${cleanNick} (P2 Rival) has joined the duel arena!`,
-        timestamp: Date.now(),
+        timestamp: Date.now()
       })
 
-      // Enter lobby as Player 2 (Magenta)
+      // 8. Transition to lobby
       setRoom(fullCode, 2, 'text-secondary', 'connected', 'lobby')
     } catch (err) {
-      console.warn('Join error:', err)
-      setErrorMsg('Failed to connect to Firebase. Please check your network.')
+      console.error('Join error:', err)
+      setErrorMsg(err?.message || 'Failed to connect to Firebase. Please check your network.')
     } finally {
       setIsConnecting(false)
     }

@@ -59,11 +59,11 @@ export default function App() {
           setOpponentNickname(session.players[oppSlot].nickname)
         }
 
-        // Determine target view based on session lifecycle (Rule 1 & 11)
+        // Determine target view based on session lifecycle
         let targetView = 'lobby'
         if (session.status === 'waiting') {
           targetView = 'host_waiting'
-        } else if (session.activeGame === 'tictactoe' || session.game?.status === 'active') {
+        } else if (session.activeGame === 'tictactoe') {
           targetView = 'game'
           setActiveGame('tictactoe')
         }
