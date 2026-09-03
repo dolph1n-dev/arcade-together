@@ -1,3 +1,4 @@
+import Lobby from './components/Lobby'
 import { useState, useEffect } from 'react'
 import { db } from './lib/firebase'
 import { ref, set, get, onValue, update } from 'firebase/database'
@@ -113,7 +114,9 @@ function App() {
         </div>
       )}
 
-      {roomStatus === 'connected' && (
+      {roomStatus === 'connected' ? (
+        <Lobby />
+      ) : (
         <div className="text-center">
           <p className="text-2xl mb-4">Bağlantı Kuruldu!</p>
           <p className="mb-2">Oda: <span className="font-bold">{roomId}</span></p>
