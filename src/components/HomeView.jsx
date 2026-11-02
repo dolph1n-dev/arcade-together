@@ -4,6 +4,7 @@ import { useStore } from '../store'
 import { db } from '../lib/firebase'
 import { ref, set, serverTimestamp } from 'firebase/database'
 import { setupPresenceTracker } from '../lib/session'
+import { sanitizeNickname } from '../lib/sanitize'
 
 export default function HomeView() {
   const { nickname, userPlayerId, setNickname, setRoom, setView } = useStore()
@@ -38,7 +39,7 @@ export default function HomeView() {
         players: {
           playerA: {
             playerId: userPlayerId,
-            nickname: nickname || 'CyberKnight',
+            nickname: sanitizeNickname(nickname) || 'CyberKnight',
             slot: 'playerA',
             connected: true,
             lastSeen: serverTimestamp()
@@ -61,7 +62,7 @@ export default function HomeView() {
             id: 'init',
             playerId: 'system',
             senderName: 'SYSTEM',
-            text: `Room created by ${nickname || 'CyberKnight'}. Waiting for rival to connect...`,
+            text: `Room created by ${sanitizeNickname(nickname) || 'CyberKnight'}. Waiting for rival to connect...`,
             timestamp: Date.now()
           }
         }

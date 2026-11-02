@@ -12,6 +12,7 @@ import { useStore } from '../store'
 import { db } from '../lib/firebase'
 import { ref, onValue, push, update } from 'firebase/database'
 import { setupPresenceTracker } from '../lib/session'
+import { sanitizeMessage } from '../lib/sanitize'
 
 export default function LobbyView() {
   const { 
@@ -214,9 +215,9 @@ export default function LobbyView() {
     const newMsg = {
       playerId,
       userPlayerId,
-      senderName: nickname,
+      senderName: sanitizeMessage(nickname),
       color: playerId === 1 ? 'text-[#00f5d4]' : 'text-[#ffade6]',
-      text,
+      text: sanitizeMessage(text),
       timestamp: Date.now()
     }
 

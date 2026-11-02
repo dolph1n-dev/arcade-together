@@ -2,6 +2,10 @@
 logs
 *.log
 npm-debug.log*
+
+# Environment variables (security)
+.env
+.env.local
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*

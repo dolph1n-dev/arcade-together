@@ -1,0 +1,39 @@
+{
+  "rules": {
+    "sessions": {
+      "$sessionId": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "players": {
+          "$slot": {
+            ".write": "auth != null && auth.uid === newData.val().playerId || auth.uid === data.val().playerId",
+            ".read": "auth != null"
+          }
+        },
+        "game": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        },
+        "messages": {
+          ".read": "auth != null",
+          ".write": "auth != null",
+          "$messageId": {
+            ".validate": "newData.hasChildren(['playerId', 'senderName', 'text', 'timestamp'])",
+            "text": {
+              ".validate": "newData.isString() && newData.val().length <= 500"
+            }
+          }
+        },
+        ".validate": "newData.hasChildren(['sessionId', 'status', 'hostPlayerId', 'players'])"
+      }
+    },
+    "presence": {
+      "$sessionId": {
+        "$slot": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.uid === data.val().playerId"
+        }
+      }
+    }
+  }
+}

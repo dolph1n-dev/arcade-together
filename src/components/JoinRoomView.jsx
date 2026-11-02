@@ -4,6 +4,8 @@ import { useStore } from '../store'
 import { db } from '../lib/firebase'
 import { ref, get, push, update } from 'firebase/database'
 import { setupPresenceTracker } from '../lib/session'
+import { sanitizeNickname } from '../lib/sanitize'
+import { registerAttempt } from '../lib/rateLimit'
 
 export default function JoinRoomView() {
   const { nickname, userPlayerId, setNickname, setRoom, setView, setOpponentNickname } = useStore()
@@ -73,8 +75,17 @@ export default function JoinRoomView() {
       return
     }
 
-    const cleanNick = nick.trim() || 'CyberPlayer'
+    const cleanNick = sanitizeNickname(nick) || 'CyberPlayer'
     setNickname(cleanNick)
+
+    // Brute force koruması: oda kod deneme sayısını sınırla
+    const rateLimit = registerAttempt(fullCode)
+    if (rateLimit.blocked) {
+      setErrorMsg(`Çok fazla deneme yaptınız. Lütfen ${Math.ceil(rateLimit.remainingMs / 1000 / 60)} dakika sonra tekrar deneyin.`)
+      setIsConnecting(false)
+      return
+    }
+
     setIsConnecting(true)
 
     try {

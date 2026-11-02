@@ -9,6 +9,7 @@ import {
   generateActionId, 
   setupPresenceTracker 
 } from '../lib/session'
+import { sanitizeNickname, sanitizeMessage } from '../lib/sanitize'
 
 export default function TicTacToeGame() {
   const { 
@@ -259,7 +260,7 @@ export default function TicTacToeGame() {
       const messagesRef = ref(db, `sessions/${roomId}/messages`)
       await push(messagesRef, {
         playerId: mySlot,
-        senderName: nickname,
+        senderName: sanitizeNickname(nickname),
         text: `Requested a rematch!`,
         timestamp: Date.now(),
       })
@@ -318,7 +319,7 @@ export default function TicTacToeGame() {
       await push(messagesRef, {
         playerId: 'system',
         senderName: 'SYSTEM',
-        text: `${nickname} surrendered. ${opponentNickname || 'Opponent'} wins!`,
+        text: `${sanitizeNickname(nickname)} surrendered. ${sanitizeNickname(opponentNickname) || 'Opponent'} wins!`,
         timestamp: Date.now(),
       })
     } catch (err) {
@@ -351,8 +352,8 @@ export default function TicTacToeGame() {
         const messagesRef = ref(db, `sessions/${roomId}/messages`)
         await push(messagesRef, {
           playerId: myNumericId,
-          senderName: nickname,
-          text: reactionText,
+          senderName: sanitizeNickname(nickname),
+          text: sanitizeMessage(reactionText),
           timestamp: Date.now(),
         })
       } catch (err) {

@@ -4,6 +4,7 @@ import { useStore } from '../store'
 import { db } from '../lib/firebase'
 import { ref, onValue, update } from 'firebase/database'
 import { setupPresenceTracker } from '../lib/session'
+import { sanitizeNickname } from '../lib/sanitize'
 
 export default function HostWaitingView() {
   const { roomId, nickname, setNickname, setRoom, resetRoom, setOpponentNickname } = useStore()
@@ -66,7 +67,7 @@ export default function HostWaitingView() {
     if (roomId) {
       try {
         const playerRef = ref(db, `sessions/${roomId}/players/playerA`)
-        await update(playerRef, { nickname: clean })
+        await update(playerRef, { nickname: sanitizeNickname(clean) })
       } catch (err) {
         console.warn('Update nickname error:', err)
       }
